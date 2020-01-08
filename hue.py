@@ -125,6 +125,8 @@ class hue(sofabase):
             self.log=log
             self.notify=notify
             self.polltime=5
+            if "poll_time" in self.dataset.config:
+                self.polltime=self.dataset.config['poll_time']
             self.loop=loop
             self.inuse=False
             
