@@ -12,13 +12,13 @@ import definitions
 
 import math
 import random
-from collections import namedtuple
-
+from collections import namedtuple, Counter
 import json
 from huecolor import ColorHelper, colorConverter
 from ahue import Bridge, QhueException, create_new_username
 import asyncio
 import aiohttp
+
 
 class hue(sofabase):
 
@@ -114,6 +114,77 @@ class hue(sofabase):
             except:
                 self.adapter.log.error('!! Error setting color temperature', exc_info=True)
 
+    #-----
+    class GroupEndpointHealth(EndpointHealth):
+
+        @property            
+        def connectivity(self):
+            return 'OK'
+
+    class GroupPowerController(PowerController):
+
+        @property            
+        def powerState(self):
+            if not self.nativeObject['state']['any_on']:
+                return "OFF"
+            return "ON"
+            
+        async def TurnOn(self, correlationToken='', **kwargs):
+            try:
+                response=await self.adapter.setHueGroup(self.deviceid, { 'on':True })
+                #await self.adapter.dataset.ingest(response)
+                return self.device.Response(correlationToken)
+            except:
+                self.adapter.log.error('!! Error during TurnOn', exc_info=True)
+        
+        async def TurnOff(self, correlationToken='', **kwargs):
+
+            try:
+                response=await self.adapter.setHueGroup(self.deviceid, { 'on':False })
+                #await self.adapter.dataset.ingest(response)
+                return self.device.Response(correlationToken)
+            except:
+                self.adapter.log.error('!! Error during TurnOff', exc_info=True)
+                
+    class GroupBrightnessController(BrightnessController):
+
+        @property            
+        def brightness(self):
+            return 50
+
+    class GroupColorController(ColorController):
+
+        @property            
+        def color(self):
+            # The real values are based on this {"bri":int(hsbdata['brightness']*255), "sat":int(hsbdata['saturation']*255), "hue":int((hsbdata['hue']/360)*65536)}
+            return {"hue":100, "saturation":100, "brightness":100 }
+
+        async def SetColor(self, payload, correlationToken='', **kwargs):
+ 
+            try:
+                if type(payload['color']) is not dict:
+                    payloadColor=json.loads(payload['color'])
+                else:
+                    payloadColor=payload['color']
+                nativeCommand={'on':True, 'transitiontime': 1, "bri": int(float(payloadColor['brightness'])*255), "sat": int(float(payloadColor['saturation'])*255), "hue": int((float(payloadColor['hue'])/360)*65536) }
+                response=await self.adapter.setHueGroup(self.deviceid, nativeCommand)
+                #await self.adapter.dataset.ingest(response, mergeReplace=True)
+                return self.device.Response(correlationToken)
+
+            except:
+                self.adapter.log.error('!! Error setting color', exc_info=True)
+
+
+    class GroupColorTemperatureController(ColorTemperatureController):
+
+        @property            
+        def colorTemperatureInKelvin(self):
+            # Hue CT value uses "mireds" which is roughly 1,000,000/ct = Kelvin
+            # Here we are reducing the range and then multiplying to round into hundreds
+            return 5000
+    
+
+
     
     class adapterProcess(adapterbase):
         
@@ -121,6 +192,7 @@ class hue(sofabase):
             self.hueColor=colorConverter()
             self.dataset=dataset
             self.dataset.nativeDevices['lights']={}
+            self.dataset.nativeDevices['groups']={}
             self.definitions=definitions.Definitions
             self.log=log
             self.notify=notify
@@ -211,12 +283,13 @@ class hue(sofabase):
             try:
                 return await self.bridge()
             except aiohttp.client_exceptions.ClientConnectorError:
-                self.log.error("!! Error connecting to hue bridge.")
+                self.log.error("!! Error connecting to hue bridge. (Client Connector Error)")
                 return {}
             except aiohttp.client_exceptions.ServerDisconnectedError:
-                self.log.error("!! Error - hue bridge disconnected while retrieving data.")
+                self.log.error("!! Error - hue bridge disconnected while retrieving data. (Server Disconnected Error)")
                 return {}
-
+            except aiohttp.client_exceptions.ClientOSError:
+                self.log.error("!! Error - hue bridge connection failur - reset by peer.")
             except:
                 self.log.error("Error getting hue data.",exc_info=True)
                 return {}
@@ -256,7 +329,10 @@ class hue(sofabase):
         
             try:
                 while self.inuse:
-                    await asyncio.sleep(.02)
+                    try:
+                        await asyncio.sleep(.2)
+                    except concurrent.futures._base.CancelledError:
+                        pass
                     
                 if light not in self.dataset.nativeDevices['lights']:
                     for alight in self.dataset.nativeDevices['lights']:
@@ -286,6 +362,38 @@ class hue(sofabase):
                 self.inuse=False
                 return {}
 
+        async def setHueGroup(self, group, data):
+        
+            try:
+                while self.inuse:
+                    try:
+                        await asyncio.sleep(.1)
+                    except concurrent.futures._base.CancelledError:
+                        pass
+                        
+                    
+                if group in self.dataset.nativeDevices['groups']:
+                    data['transitiontime']=5
+                    self.inuse=True
+                    response=await self.bridge.groups[int(group)].action(**data)
+                    state={}
+                    for item in response:
+                        if 'success' in item:
+                            for successitem in item['success']:
+                                prop=successitem.split('/')[4]
+                                if prop!='transitiontime':
+                                    state[prop]=item['success'][successitem]
+                    
+                    #result={'lights': { light : {'state':state }}}
+                    result=await self.getHueBridgeData(category='lights')
+                    self.inuse=False
+                return result
+
+            except:
+                self.log.info("Error setting hue light: %s %s" % (group, data),exc_info=True)
+                self.inuse=False
+                return {}
+
 
         # Utility Functions
 
@@ -309,6 +417,11 @@ class hue(sofabase):
                     nativeObject=self.dataset.getObjectFromPath(self.dataset.getObjectPath(path))
                     if nativeObject['name'] not in self.dataset.localDevices: 
                         return await self.addSmartLight(path.split("/")[2])
+                if path.split("/")[1]=="groups":
+                    nativeObject=self.dataset.getObjectFromPath(self.dataset.getObjectPath(path))
+                    if nativeObject['name'] not in self.dataset.localDevices: 
+                        return await self.addNativeGroup(path.split("/")[2])
+
             except:
                 self.log.error('Error defining smart device', exc_info=True)
                 return False
@@ -331,7 +444,37 @@ class hue(sofabase):
                 return self.dataset.newaddDevice(device)
             except:
                 self.log.error('Error in AddSmartLight %s' % deviceid, exc_info=True)
+
+        async def addNativeGroup(self, deviceid):
+            
+            try:
+                nativeObject=self.dataset.nativeDevices['groups'][deviceid]
+                device=devices.alexaDevice('hue/groups/%s' % deviceid, nativeObject['name'], displayCategories=['GROUP'], manufacturerName="Philips Hue", modelName=nativeObject['type'], hidden=True, adapter=self)
+                device.PowerController=hue.GroupPowerController(device=device)
+                device.EndpointHealth=hue.GroupEndpointHealth(device=device)
+                device.BrightnessController=hue.GroupBrightnessController(device=device)
+                device.ColorTemperatureController=hue.GroupColorTemperatureController(device=device)
+                device.ColorController=hue.GroupColorController(device=device)
+
+                return self.dataset.newaddDevice(device)
+            except:
+                self.log.error('Error in AddSmartLight %s' % deviceid, exc_info=True)
+
                 
+        async def virtual_group_handler(self, controllers, devicelist):
+            try:
+                for group in self.dataset.nativeDevices['groups']:
+                    groupmembers=[]
+                    for link in self.dataset.nativeDevices['groups'][group]['lights']:
+                        groupmembers.append("hue:lights:"+link)
+                    if Counter(devicelist) == Counter(groupmembers):  
+                        response={ "id": "hue:groups:"+group, "name": self.dataset.nativeDevices['groups'][group]['name'] }
+                        #self.log.info('<< nativegroup response for %s: %s' % (devicelist,response ))
+                        return response
+            except:
+                self.log.error('!! error trying to get virtual group: %s' % devicelist, exc_info=True)
+                
+            return {}                
 
 if __name__ == '__main__':
     adapter=hue(name='hue')
