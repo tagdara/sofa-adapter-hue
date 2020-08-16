@@ -31,6 +31,8 @@ class Resource(object):
         if post_username_match is not None:
             self.short_address = post_username_match.group(1)
         self.timeout = timeout
+        self.client_timeout = aiohttp.ClientTimeout(total=timeout)
+        self.conn = aiohttp.TCPConnector()
 
     async def __call__(self, *args, **kwargs):
         url = self.url
@@ -39,19 +41,19 @@ class Resource(object):
         http_method = kwargs.pop('http_method',
             'get' if not kwargs else 'put').lower()
         if http_method == 'put':
-            async with aiohttp.ClientSession() as client:
+            async with aiohttp.ClientSession(connector=self.conn, connector_owner=False, timeout=self.client_timeout) as client:
                 async with client.put(url, data=json.dumps(kwargs, default=list)) as response:
                     resp=await response.json()
         elif http_method == 'post':
-            async with aiohttp.ClientSession() as client:
+            async with aiohttp.ClientSession(connector=self.conn, connector_owner=False, timeout=self.client_timeout) as client:
                 async with client.post(url, data=json.dumps(kwargs, default=list)) as response:
                     resp=await response.json()
         elif http_method == 'delete':
-            async with aiohttp.ClientSession() as client:
+            async with aiohttp.ClientSession(connector=self.conn, connector_owner=False, timeout=self.client_timeout) as client:
                 async with client.delete(url) as response:
                     resp=await response.json()
         else:
-            async with aiohttp.ClientSession() as client:
+            async with aiohttp.ClientSession(connector=self.conn, connector_owner=False, timeout=self.client_timeout) as client:
                 async with client.get(url) as response:
                     resp=await response.json()
 
@@ -122,6 +124,7 @@ class Bridge(Resource):
         """
         self.ip = ip
         self.username = username
+        
         url = _api_url(ip, username)
         super(Bridge, self).__init__(url, timeout=timeout)
 

@@ -5,8 +5,7 @@ import sys, os
 sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.join(os.path.dirname(__file__),'../../base'))
 
-from sofabase import sofabase
-from sofabase import adapterbase
+from sofabase import sofabase, adapterbase, configbase
 import devices
 import definitions
 
@@ -18,9 +17,17 @@ from huecolor import ColorHelper, colorConverter
 from ahue import Bridge, QhueException, create_new_username
 import asyncio
 import aiohttp
+import datetime
 
 
 class hue(sofabase):
+    
+    class adapter_config(configbase):
+    
+        def adapter_fields(self):
+            self.poll_time=self.set_or_default('poll_time', 5)
+            self.hue_user=self.set_or_default('hue_user', mandatory=True)
+            self.hue_bridge_address=self.set_or_default('hue_bridge_address', mandatory=True)
 
     class EndpointHealth(devices.EndpointHealth):
 
@@ -183,31 +190,31 @@ class hue(sofabase):
             # Here we are reducing the range and then multiplying to round into hundreds
             return 5000
     
-
-
     
     class adapterProcess(adapterbase):
         
-        def __init__(self, log=None, loop=None, dataset=None, notify=None, request=None, **kwargs):
+        def __init__(self, log=None, loop=None, dataset=None, notify=None, request=None, config=None, **kwargs):
             self.hueColor=colorConverter()
             self.dataset=dataset
             self.dataset.nativeDevices['lights']={}
             self.dataset.nativeDevices['groups']={}
             self.definitions=definitions.Definitions
             self.log=log
+            self.config=config
             self.notify=notify
-            self.polltime=5
-            if "poll_time" in self.dataset.config:
-                self.polltime=self.dataset.config['poll_time']
             self.loop=loop
             self.inuse=False
+
+        async def pre_activate(self):
+            self.log.info('.. Starting hue')
+            self.bridge = Bridge(self.config.hue_bridge_address, self.config.hue_user)
+            await self.getHueBridgeData('all')
             
         async def start(self):
-            self.log.info('.. Starting hue')
-            self.bridge = Bridge(self.dataset.config['address'], self.dataset.config['user'])
-            await self.pollHueBridge()
+            self.polling_task = asyncio.create_task(self.pollHueBridge())
             
         async def pollHueBridge(self):
+            self.log.info(".. polling loop every %s seconds for bridge data" % self.config.poll_time)
             while True:
                 try:
                     #self.log.info("Polling bridge data")
@@ -215,7 +222,7 @@ class hue(sofabase):
                 except:
                     self.log.error('Error fetching Hue Bridge Data', exc_info=True)
                 
-                await asyncio.sleep(self.polltime)
+                await asyncio.sleep(self.config.poll_time)
                     
 
         async def getHueBridgeData(self, category='all', device=None):
@@ -270,8 +277,11 @@ class hue(sofabase):
                         self.log.info('Could not find light: %s' % light)
                         return None
                 else:
-                    #self.log.info('Lights: %s' % json.dumps(self.bridge.lights()))
-                    return await self.bridge.lights()
+                    lightstart=datetime.datetime.now()
+                    light_data=await self.bridge.lights()
+                    lightend=datetime.datetime.now()
+                    self.log.info('.. time to get light data: %s' % (lightend-lightstart).total_seconds())
+                    return light_data
             except aiohttp.client_exceptions.ClientConnectorError:
                 self.log.error("Error getting hue config. (Failed to connect to hub)")
                 
@@ -281,18 +291,24 @@ class hue(sofabase):
 
         async def getHueAll(self):
             try:
-                return await self.bridge()
+                allstart=datetime.datetime.now()
+                all_data=await self.bridge()
+                allend=datetime.datetime.now()
+                if (allend-allstart).total_seconds()>0.5:
+                    self.log.info('.. long time to get all data: %s' % (allend-allstart).total_seconds())
+
+                return all_data
             except aiohttp.client_exceptions.ClientConnectorError:
                 self.log.error("!! Error connecting to hue bridge. (Client Connector Error)")
-                return {}
+
             except aiohttp.client_exceptions.ServerDisconnectedError:
                 self.log.error("!! Error - hue bridge disconnected while retrieving data. (Server Disconnected Error)")
-                return {}
+
             except aiohttp.client_exceptions.ClientOSError:
-                self.log.error("!! Error - hue bridge connection failur - reset by peer.")
+                self.log.error("!! Error - hue bridge connection failure - reset by peer.")
             except:
                 self.log.error("Error getting hue data.",exc_info=True)
-                return {}
+            return {}
 
         async def getHueGroups(self):
             try:
@@ -468,7 +484,7 @@ class hue(sofabase):
                     for link in self.dataset.nativeDevices['groups'][group]['lights']:
                         groupmembers.append("hue:lights:"+link)
                     if Counter(devicelist) == Counter(groupmembers):  
-                        response={ "id": "hue:groups:"+group, "name": self.dataset.nativeDevices['groups'][group]['name'] }
+                        response={ "id": "hue:groups:"+group, "name": self.dataset.nativeDevices['groups'][group]['name'], "members":groupmembers }
                         #self.log.info('<< nativegroup response for %s: %s' % (devicelist,response ))
                         return response
             except:
