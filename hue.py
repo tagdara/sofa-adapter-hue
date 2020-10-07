@@ -229,18 +229,21 @@ class hue(sofabase):
             
             try:
                 #self.log.info('Polling %s' % category)
+                reqstart=datetime.datetime.now()
                 changes=[]
                 if category=="all":
                     alldata=await self.getHueAll()
                     if alldata:
                         changes=await self.dataset.ingest({'lights':alldata['lights'], 'sensors':alldata['sensors'], 'groups':alldata['groups']}, mergeReplace=True)
+
                 elif category=="lights":
                     changes=await self.dataset.ingest({'lights': await self.getHueLights(device)}, mergeReplace=True)
                 elif category=="groups":
                     await self.dataset.ingest({'groups': await self.getHueGroups()}, mergeReplace=True)
                 elif category=="sensors":
                     await self.dataset.ingest({'sensors':await self.getHueSensors()}, mergeReplace=True)
-                    
+                reqend=datetime.datetime.now()  
+                #self.log.info('process time: %s' % (reqend-reqstart).total_seconds())
                 return changes
 
             except:
@@ -293,10 +296,12 @@ class hue(sofabase):
             try:
                 allstart=datetime.datetime.now()
                 all_data=await self.bridge()
+                #self.log.info('.. data size: %s' % len(json.dumps(all_data)))
+
                 allend=datetime.datetime.now()
                 if (allend-allstart).total_seconds()>0.5:
                     self.log.info('.. long time to get all data: %s' % (allend-allstart).total_seconds())
-
+                #self.log.info('.. time to get all data: %s' % (allend-allstart).total_seconds())
                 return all_data
             except aiohttp.client_exceptions.ClientConnectorError:
                 self.log.error("!! Error connecting to hue bridge. (Client Connector Error)")
@@ -306,8 +311,10 @@ class hue(sofabase):
 
             except aiohttp.client_exceptions.ClientOSError:
                 self.log.error("!! Error - hue bridge connection failure - reset by peer.")
+            except concurrent.futures._base.TimeoutError:
+                self.log.error("!! Error connecting to hue bridge. (Timeout Error)")
             except:
-                self.log.error("Error getting hue data.",exc_info=True)
+                self.log.error("!! Error getting hue data.",exc_info=True)
             return {}
 
         async def getHueGroups(self):
@@ -429,14 +436,15 @@ class hue(sofabase):
         async def addSmartDevice(self, path):
             
             try:
-                if path.split("/")[1]=="lights":
-                    nativeObject=self.dataset.getObjectFromPath(self.dataset.getObjectPath(path))
-                    if nativeObject['name'] not in self.dataset.localDevices: 
-                        return await self.addSmartLight(path.split("/")[2])
-                if path.split("/")[1]=="groups":
-                    nativeObject=self.dataset.getObjectFromPath(self.dataset.getObjectPath(path))
-                    if nativeObject['name'] not in self.dataset.localDevices: 
-                        return await self.addNativeGroup(path.split("/")[2])
+                device_id=path.split("/")[2]
+                device_type=path.split("/")[1]
+                endpointId="%s:%s:%s" % ("hue", device_type, device_id)
+                if endpointId not in self.dataset.localDevices:  # localDevices/friendlyNam   
+                    if device_type=="lights":
+                        return await self.addSmartLight(device_id)
+                            
+                    if device_type=="groups":
+                        return await self.addNativeGroup(device_id)
 
             except:
                 self.log.error('Error defining smart device', exc_info=True)
@@ -456,8 +464,9 @@ class hue(sofabase):
                     device.ColorTemperatureController=hue.ColorTemperatureController(device=device)
                 if nativeObject["type"] in ["Extended color light", "Color light"]:
                     device.ColorController=hue.ColorController(device=device)
-
-                return self.dataset.newaddDevice(device)
+                
+                # return self.dataset.newaddDevice(device) older friendlyname based localDevices
+                return self.dataset.add_device(device)
             except:
                 self.log.error('Error in AddSmartLight %s' % deviceid, exc_info=True)
 
@@ -472,7 +481,7 @@ class hue(sofabase):
                 device.ColorTemperatureController=hue.GroupColorTemperatureController(device=device)
                 device.ColorController=hue.GroupColorController(device=device)
 
-                return self.dataset.newaddDevice(device)
+                return self.dataset.add_device(device)
             except:
                 self.log.error('Error in AddSmartLight %s' % deviceid, exc_info=True)
 
