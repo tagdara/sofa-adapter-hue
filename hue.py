@@ -18,6 +18,7 @@ from ahue import Bridge, QhueException, create_new_username
 import asyncio
 import aiohttp
 import datetime
+import concurrent.futures
 
 
 class hue(sofabase):
@@ -247,7 +248,7 @@ class hue(sofabase):
                 return changes
 
             except:
-                self.log.error('Error fetching Hue Bridge Data', exc_info=True)
+                self.log.error('!! Error fetching Hue Bridge Data', exc_info=True)
                 return {}
 
 
